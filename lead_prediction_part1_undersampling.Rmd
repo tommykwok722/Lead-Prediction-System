@@ -1,0 +1,773 @@
+---
+title: "Group 17"
+output: html_document
+date: "2023-11-10"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Install required packages
+
+#install.packages('tidyverse')
+#install.packages("dplyr")
+#install.packages("caret")
+#install.packages("FSelector")
+#install.packages("C50")
+#install.packages("MASS")
+#install.packages('e1071')
+#install.packages("randomForest")
+#install.packages("pROC")
+#install.packages("performanceEstimation")
+#install.packages("data.table")
+#install.packages("ROSE")
+#install.packages("mltools")
+#install.packages("mice")
+#install.packages("ggplot2")
+#install.packages("ggpubr")
+#install.packages("foreach")
+#install.packages("parallel")
+#install.packages("CustomerScoringMetrics")
+
+```
+
+```{r}
+# Run required libraries
+
+# Load tidyverse package
+library(tidyverse)
+
+# Load dplyr package
+library(dplyr)
+
+# Load caret for data partitioning
+library(caret)
+
+# Load FSelector package for Feature Selection
+library(FSelector)
+
+# Load C50 package for Decision Tree
+library(C50)
+
+# Load MASS package for Linear Discriminant Analysis Model
+library(MASS)
+
+# Load e1071 package for SVM
+library(e1071)
+
+# Load randomForest package for Random Forest Model
+library(randomForest)
+
+# Load ROCR package for ROC chart
+library(pROC)
+
+# Load performanceEstimation for SMOTE
+library(performanceEstimation)
+
+# Load other libraries
+library(data.table)
+library(ROSE)
+library(mltools)
+library(ggplot2)
+library(ggpubr)
+library(mice)
+library(foreach)
+
+# Load parallel package for parallel computing
+library(parallel)
+
+# Load CustomerScoringMetrics package for cumulative gain chart
+library(CustomerScoringMetrics)
+```
+
+---
+
+## Data Dictionary
+
+**World Plus** has provided a dataset of historic customer records during a previous product offering.
+
+The details of the dataset are described in the table below:
+- Number of instances: 220000
+- Number of variables: 16
+
+| Variable            | Description                                                                                      |               
+| :------------------ | :----------------------------------------------------------------------------------------------- |
+| ID                  | Customer's identification number                                                                 |
+| Gender              | Gender of the customer                                                                           |
+| Age                 | Age of the customer (in years)                                                                   |
+| Dependent           | Whether the customer has a dependent or not                                                      |
+| Marital_Status      | Marital status of the customer (1 = Married; 2 = Single; 0 = Others)                             |
+| Region_Code         | Code of the region for the customer                                                              |
+| Years_at_Residence  | The duration in the current residence (in years)                                                 |
+| Occupation          | Occupation type of the customer                                                                  |
+| Channel_Code        | Acquisition channel code used to reach the customer when they opened their bank account          |
+| Vintage             | The number of months that the customer has been associated with the company                      |
+| Credit_Product      | Whether the customer has any active credit products or not                                       |
+| Avg_Account_Balance | Average account balance of the customer in the past 12 months                                    |
+| Account_Type        | Type of the account that the customer holds (with categories Silver, Gold and Platinum)          |
+| Active              | Whether the customer was active or not in the past 3 months                                      |
+| Registration        | Whether the customer has visited the bank for the offered product registration (1 = Yes; 0 = No) |
+| Target              | Whether the customer has purchased the product (1 = Purchased; 0 = Did not purchase)             |
+
+---
+
+## Import and Read Dataset
+
+```{r}
+# Import dataset
+data <- read.csv('assignment_data.csv')
+
+# Check the structure of the dataset
+str(data)
+
+# Check the summary of the dataset
+summary(data)
+```
+
+---
+
+## Data Cleaning
+
+```{r}
+# Remove redundant variables
+data$ID <- NULL
+
+# Assuming -1 is a typo in "Dependent" column, replacing it to 1.
+index_dependent <- which(data$Dependent == -1)  
+data$Dependent[index_dependent] = 1
+
+# Calculating Missing Proportion for MICE
+( missing_percentage <- sum(is.na(data$Credit_Product))* 100/ length(data$Credit_Product) )
+data$Credit_Product <- as.factor(data$Credit_Product)
+
+# Perform the imputation. Exclude "Target" variable from imputation, as the imputation model may unintentionally use information from the target variable to impute missing values in other variables. This can lead to a form of data leakage, where the imputation model "learns" from the variable it is supposed to predict.
+imputed_data <- mice(data[, -which(names(data) == "Target")], 
+                      m = 5, 
+                      maxit = 50, 
+                      method = 'pmm', 
+                      seed = 500)
+data.imputed <- complete(imputed_data, 1)
+table(data.imputed$Credit_Product, useNA='ifany')
+data.imputed$Target <- data$Target
+
+# Convert data type to factor in the following columns
+cols_name <- c("Dependent", "Marital_Status", "Registration", "Target")
+data.imputed[cols_name] <- lapply(data.imputed[cols_name] , factor)
+
+# Check the summary and structure of the dataset again to make sure the data is clean
+summary(data.imputed)
+str(data.imputed)
+```
+
+---
+
+## Data Encoding
+
+If we look at the structure of "Account Type", we can see there are 3 different types: Gold, Platinum and Silver.
+Since these are ordinal variable, we should use "Label encoding" to set the order as Silver < Gold < Platinum
+
+```{r}
+# Label encoding "Account Type", "Credit Product" and "Active"
+data.imputed <- data.imputed %>%
+  mutate(
+    Account_Type = ifelse(Account_Type == "Silver", 1, ifelse(Account_Type == "Gold", 2, 3)),
+    Credit_Product = ifelse(Credit_Product == "Yes", 1, 0),
+    Active = ifelse(Active == "Yes", 1, 0))
+
+# Convert data type to factor
+cols_name1 <- c("Account_Type", "Credit_Product", "Active", "Occupation","Channel_Code","Region_Code","Gender")
+data.imputed[cols_name1] <- lapply(data.imputed[cols_name1] , factor)
+```
+
+Also, since categorical values need to be in numerical output, we must use one-hot encoding for variables that uses characters:
+"Occupation"
+
+```{r}
+# One-hot encoding for "Occupation"
+data.imputed <- one_hot(as.data.table(data.imputed), cols = "Occupation")
+
+# Convert data type to factor
+data.imputed$Occupation_Entrepreneur <- as.factor(data.imputed$Occupation_Entrepreneur)
+data.imputed$Occupation_Other <- as.factor(data.imputed$Occupation_Other)
+data.imputed$Occupation_Salaried <- as.factor(data.imputed$Occupation_Salaried)
+data.imputed$Occupation_Self_Employed <- as.factor(data.imputed$Occupation_Self_Employed)
+
+# Check the summary and structure of the dataset again after data encoding
+summary(data.imputed)
+str(data.imputed)
+```
+
+---
+
+## Data Quality Checks and Visualisataion
+
+```{r}
+# Check the distribution of average account balance
+# 1.Plotting the Histogram to visualise the distribution of Avg_Account_Balance
+data.imputed %>%
+  ggplot(aes(x = Avg_Account_Balance, y = ..density..)) +
+  geom_histogram(bins = 50) +
+  geom_density(color = "red") +
+  ggtitle("Distribution of Average Account Balance") +
+  xlab("Average Account Balance") +
+  ylab("Density")
+
+
+# 2. Which communication channel is used the most, and how well is it working?
+data_percent <- data.imputed %>%
+  group_by(Channel_Code) %>%
+  count(Target) %>%
+  mutate(Percent = n / sum(n) * 100)
+
+ggplot(data_percent, aes(x = Channel_Code, y = n, fill = as.factor(Target))) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(
+    aes(label = paste0(round(Percent, 1), '%'), 
+        y = n, # Adjust this offset as needed
+        group = Target),
+    position = position_dodge(width = 0.9),
+    vjust = -0.5, # Adjust vertical justification to position text above bars
+    size = 3.5  # Adjust text size as needed
+  ) +
+  labs(x = "Channel Code", y = "No. of Customers", fill = "Target",title = "Target Distribution across Channel Codes")
+
+# 3. Sort the average account balance in descending order to check if there are any outliers
+data.imputed %>%
+  dplyr::select(Avg_Account_Balance) %>%
+  arrange(desc(Avg_Account_Balance))
+```
+
+---
+
+## Information Gain
+
+### Data partitioning
+
+```{r}
+# Set a seed with 123
+set.seed(123)
+
+# Partition the dataset into training and test sets
+# index keeps the record indices for the training data
+index = createDataPartition(data.imputed$Target, p = 0.7, list = FALSE)
+
+training = data.imputed[index,]
+test = data.imputed[-index,]
+```
+
+### Finding the feature importance in descending order 
+
+```{r}
+# Compute information gain values of the attributes
+weights <- information.gain(Target~., training)
+
+# Add row names as a column to keep them during ordering
+weights$attr <- rownames(weights)
+
+# Sort the information gain values in descending order
+weights <- arrange(weights, -attr_importance)
+
+# Plot the information gain values
+barplot(weights$attr_importance, names = weights$attr, las = 2)
+
+# Removing the 4 features with the least information gain values (not including Occupation_Other)
+features <- c('Dependent', 'Marital_Status', 'Account_Type', 'Years_at_Residence')
+test[,(features) := NULL]
+training[, (features) := NULL]
+```
+
+---
+
+## Undersampling on the training data.
+
+```{r}
+training.undersampled <- ovun.sample(Target ~ . , data = training, method = "under", p= 0.3, seed = 123)$data
+```
+
+
+## Data Modelling 
+
+### 1.1 Logistic Regression: all attributes on training.undersampled
+```{r}
+model_LR <- glm(Target~., training.undersampled, family = "binomial")
+model_LR_pred <- predict(model_LR, test, type="response")
+
+# In order to predict the class of a test data, we use default cutoff (or threshold) value 0.5. If the probability of a record is greater than 0.5, it will be marked as invalid "1", otherwise it will be marked as valid "0". We need to save these predictions as factor variable.
+
+# Predict the class 
+model_LR_class <- ifelse(model_LR_pred > 0.5, 1, 0)
+
+# Save the predictions as factor variables
+model_LR_class <- as.factor(model_LR_class)
+
+# Create a confusion matrix by comparing the column "Target" in the test data with the vector predictions of logistic regression model. 
+confusionMatrix(model_LR_class, test$Target, positive = "1", mode = "prec_recall")
+
+# Obtain the ROC curve data for logistic regression
+ROC_LR <- roc(test$Target, model_LR_pred)
+auc(ROC_LR)
+```
+
+### 1.2 Logistic Regression: 3 attributes on training.undersampled
+```{r}
+model_LR1 <- glm(Target~Registration+Age+Channel_Code, training.undersampled, family = "binomial")
+model_LR_pred1 <- predict(model_LR1, test, type="response")
+model_LR_class1 <- ifelse(model_LR_pred1 > 0.5, 1, 0) 
+model_LR_class1 <- as.factor(model_LR_class1)
+confusionMatrix(model_LR_class1, test$Target, positive = "1", mode = "prec_recall")
+ROC_LR1 <- roc(test$Target, model_LR_pred1)
+auc(ROC_LR1)
+```
+
+### 1.3 Logistic Regression: 5 attributes on training.undersampled
+```{r}
+model_LR2 <- glm(Target~Registration+Age+Channel_Code+Vintage+Credit_Product , training.undersampled, family = "binomial")
+model_LR_pred2 <- predict(model_LR2, test, type="response")
+model_LR_class2 <- ifelse(model_LR_pred2 > 0.5, 1, 0) 
+model_LR_class2 <- as.factor(model_LR_class2)
+confusionMatrix(model_LR_class2, test$Target, positive = "1", mode = "prec_recall")
+ROC_LR2 <- roc(test$Target, model_LR_pred2)
+auc(ROC_LR2)
+```
+
+### 1.4 Logistic Regression: 7 attributes on training.undersampled
+```{r}
+model_LR3 <- glm(Target~Registration+Age+Channel_Code+Vintage+Credit_Product+Region_Code+Occupation_Salaried , training.undersampled, family = "binomial")
+model_LR_pred3 <- predict(model_LR3, test, type="response")
+model_LR_class3 <- ifelse(model_LR_pred3 > 0.5, 1, 0) 
+model_LR_class3 <- as.factor(model_LR_class3)
+confusionMatrix(model_LR_class3, test$Target, positive = "1", mode = "prec_recall")
+ROC_LR3 <- roc(test$Target, model_LR_pred3)
+auc(ROC_LR3)
+```
+
+
+### 2.1 Decision Tree: All attributes on training.undersampled
+```{r}
+model_DT <- C5.0(Target~., data = training.undersampled)
+
+# Predict the result using test data
+pred_DT <- predict(model_DT, test, type = "class")
+prob_DT <- predict(model_DT, test, type = "prob")
+
+# Find the correct predictions
+correct_DT <- which(test$Target == pred_DT)
+
+# Find the percentage of correct predictions
+accuracy_DT <- length(correct_DT) / nrow(test)
+
+# Confusion matrix
+confusionMatrix(pred_DT, test$Target, positive = '1', mode = "prec_recall")
+
+# Use roc function to return some performance metrics
+ROC_DT <- roc(test$Target, prob_DT[,2])
+auc(ROC_DT)
+```
+
+### 2.2 Decision Tree: 3 attributes on training.undersampled
+```{r}
+model_DT1 <- C5.0(Target~Registration+Age+Channel_Code, data = training.undersampled)
+pred_DT1 <- predict(model_DT1, test, type = "class")
+prob_DT1 <- predict(model_DT1, test, type = "prob")
+correct_DT1 <- which(test$Target == pred_DT1)
+accuracy_DT1 <- length(correct_DT1) / nrow(test)
+confusionMatrix(pred_DT1, test$Target, positive = '1', mode = "prec_recall")
+ROC_DT1 <- roc(test$Target, prob_DT1[,2])
+auc(ROC_DT1)
+```
+
+### 2.3 Decision Tree: 5 attributes on training.undersampled
+```{r}
+model_DT2 <- C5.0(Target~Registration+Age+Channel_Code+Vintage+Credit_Product, data = training.undersampled)
+pred_DT2 <- predict(model_DT2, test, type = "class")
+prob_DT2 <- predict(model_DT2, test, type = "prob")
+correct_DT2 <- which(test$Target == pred_DT2)
+accuracy_DT2 <- length(correct_DT2) / nrow(test)
+confusionMatrix(pred_DT2, test$Target, positive = '1', mode = "prec_recall")
+ROC_DT2 <- roc(test$Target, prob_DT2[,2])
+auc(ROC_DT2)
+```
+
+### 2.4 Decision Tree: 7 attributes on training.undersampled
+```{r}
+model_DT3 <- C5.0(Target~Registration+Age+Channel_Code+Vintage+Credit_Product+Region_Code+Occupation_Salaried, data = training.undersampled)
+pred_DT3 <- predict(model_DT3, test, type = "class")
+prob_DT3 <- predict(model_DT3, test, type = "prob")
+correct_DT3 <- which(test$Target == pred_DT3)
+accuracy_DT3 <- length(correct_DT3) / nrow(test)
+confusionMatrix(pred_DT3, test$Target, positive = '1', mode = "prec_recall")
+ROC_DT3 <- roc(test$Target, prob_DT3[,2])
+auc(ROC_DT3)
+```
+
+
+### 3.1 Linear Discriminant Analysis: All attributes on training.undersampled
+```{r}
+# Build a Linear Discriminant Analysis model (classification method)
+model_LDA <- lda(Target~., data = training.undersampled)
+
+# Predict the result using test data
+pred_LDA <- predict(model_LDA, test)$class
+prob_LDA <- predict(model_LDA, test)$posterior
+
+# Find the correct predictions
+correct_LDA <- which(test$Target == pred_LDA)
+
+# Find the percentage of correct predictions
+accuracy_LDA <- length(correct_LDA) / nrow(test)
+
+# Confusion matrix
+confusionMatrix(pred_LDA, test$Target, positive = '1', mode = "prec_recall")
+
+# Use roc function to return some performance metrics
+ROC_LDA <- roc(test$Target, prob_LDA[,2])
+auc(ROC_LDA)
+```
+
+### 3.2 Linear Discriminant Analysis: 3 attributes on training.undersampled
+```{r}
+model_LDA1 <- lda(Target~Registration+Age+Channel_Code, data = training.undersampled)
+pred_LDA1 <- predict(model_LDA1, test)$class
+prob_LDA1 <- predict(model_LDA1, test)$posterior
+correct_LDA1 <- which(test$Target == pred_LDA1)
+accuracy_LDA1 <- length(correct_LDA1) / nrow(test)
+confusionMatrix(pred_LDA1, test$Target, positive = '1', mode = "prec_recall")
+ROC_LDA1 <- roc(test$Target, prob_LDA1[,2])
+auc(ROC_LDA1)
+```
+
+### 3.3 Linear Discriminant Analysis: 5 attributes on training.undersampled
+```{r}
+model_LDA2 <- lda(Target~Registration+Age+Channel_Code+Vintage+Credit_Product, data = training.undersampled)
+pred_LDA2 <- predict(model_LDA2, test)$class
+prob_LDA2 <- predict(model_LDA2, test)$posterior
+correct_LDA2 <- which(test$Target == pred_LDA2)
+accuracy_LDA2 <- length(correct_LDA2) / nrow(test)
+confusionMatrix(pred_LDA2, test$Target, positive = '1', mode = "prec_recall")
+ROC_LDA2 <- roc(test$Target, prob_LDA2[,2])
+auc(ROC_LDA2)
+```
+
+### 3.4 Linear Discriminant Analysis: 7 attributes on training.undersampled
+```{r}
+model_LDA3 <- lda(Target~Registration+Age+Channel_Code+Vintage+Credit_Product+Region_Code+Occupation_Salaried, data = training.undersampled)
+pred_LDA3 <- predict(model_LDA3, test)$class
+prob_LDA3 <- predict(model_LDA3, test)$posterior
+correct_LDA3 <- which(test$Target == pred_LDA3)
+accuracy_LDA3 <- length(correct_LDA3) / nrow(test)
+confusionMatrix(pred_LDA3, test$Target, positive = '1', mode = "prec_recall")
+ROC_LDA3 <- roc(test$Target, prob_LDA3[,2])
+auc(ROC_LDA3)
+```
+
+### 4.1 Support Vector Machine: All attributes on training.undersampled
+```{r}
+# Build the SVM model using training.undersampled
+model_SVM <- svm(Target~., data= training.undersampled, kernel = 'radial', scale = T, probability = T)
+
+# Predict the test data using the model built
+prediction_SVM <- predict(model_SVM, test)
+
+# Visualise Confusion Matrix
+confusionMatrix(prediction_SVM, test$Target, positive='1', mode = "prec_recall")
+
+# Obtain the ROC curve data for logistic regression
+prediction_SVM_prob <- predict(model_SVM, test, probability = TRUE)
+prob_SVM <- attr(prediction_SVM_prob, "probabilities")
+ROC_SVM <- roc(test$Target, prob_SVM[,2])
+auc(ROC_SVM)
+```
+
+### 4.2 Support Vector Machine: 3 attributes on training.undersampled
+```{r}
+model_SVM1 <- svm(Target~Registration+Age+Channel_Code, data= training.undersampled, kernel = 'radial', scale = T, probability = T)
+prediction_SVM1 <- predict(model_SVM1, test)
+confusionMatrix(prediction_SVM1, test$Target, positive='1', mode = "prec_recall")
+prediction_SVM_prob1 <- predict(model_SVM1, test, probability = TRUE)
+prob_SVM1 <- attr(prediction_SVM_prob1, "probabilities")
+ROC_SVM1 <- roc(test$Target, prob_SVM1[,2])
+auc(ROC_SVM1)
+```
+
+### 4.3 Support Vector Machine: 5 attributes on training.undersampled
+```{r}
+model_SVM2 <- svm(Target~Registration+Age+Channel_Code+Vintage+Credit_Product, data= training.undersampled, kernel = 'radial', scale = T, probability = T)
+prediction_SVM2 <- predict(model_SVM2, test)
+confusionMatrix(prediction_SVM2, test$Target, positive='1', mode = "prec_recall")
+prediction_SVM_prob2 <- predict(model_SVM2, test, probability = TRUE)
+prob_SVM2 <- attr(prediction_SVM_prob2, "probabilities")
+ROC_SVM2 <- roc(test$Target, prob_SVM2[,2])
+auc(ROC_SVM2)
+```
+
+### 4.4 Support Vector Machine: 7 attributes on training.undersampled
+```{r}
+model_SVM3 <- svm(Target~Registration+Age+Channel_Code+Vintage+Credit_Product+Region_Code+Occupation_Salaried, data= training.undersampled, kernel = 'radial', scale = T, probability = T)
+prediction_SVM3 <- predict(model_SVM3, test)
+confusionMatrix(prediction_SVM3, test$Target, positive='1', mode = "prec_recall")
+prediction_SVM_prob3 <- predict(model_SVM3, test, probability = TRUE)
+prob_SVM3 <- attr(prediction_SVM_prob3, "probabilities")
+ROC_SVM3 <- roc(test$Target, prob_SVM3[,2])
+auc(ROC_SVM3)
+```
+
+
+### 5.1 Random Forest: All attributes on training.undersampled
+```{r}
+set.seed(123)
+
+# Build Random Forest model and assign it to model_RF
+model_RF <- randomForest(Target~., training.undersampled)
+
+# Plot the importance values
+varImpPlot(model_RF)
+
+# Using model_RF predict the class of the test data
+prediction_RF <- predict(model_RF, test)
+
+# Compute the confusion matrix
+confusionMatrix(prediction_RF, test$Target, positive='1', mode = "prec_recall")
+
+# Obtain class probabilities by using predict() and adding type = "prob" for Random Forest model_RF
+prob_RF <- predict(model_RF, test, type = "prob")
+
+# Use roc function to return some performance metrics
+ROC_RF <- roc(test$Target, prob_RF[,2])
+
+auc(ROC_RF)
+```
+
+### 5.2 Random Forest: 3 attributes on training.undersampled
+```{r}
+set.seed(123)
+model_RF1 <- randomForest(Target~Registration+Age+Channel_Code, training.undersampled)
+varImpPlot(model_RF1)
+prediction_RF1 <- predict(model_RF1, test)
+confusionMatrix(prediction_RF1, test$Target, positive='1', mode = "prec_recall")
+prob_RF1 <- predict(model_RF1, test, type = "prob")
+ROC_RF1 <- roc(test$Target, prob_RF1[,2])
+auc(ROC_RF1)
+```
+
+### 5.3 Random Forest: 5 attributes on training.undersampled
+```{r}
+set.seed(123)
+model_RF2 <- randomForest(Target~Registration+Age+Channel_Code+Vintage+Credit_Product, training.undersampled)
+varImpPlot(model_RF2)
+prediction_RF2 <- predict(model_RF2, test)
+confusionMatrix(prediction_RF2, test$Target, positive='1', mode = "prec_recall")
+prob_RF2 <- predict(model_RF2, test, type = "prob")
+ROC_RF2 <- roc(test$Target, prob_RF2[,2])
+auc(ROC_RF2)
+```
+
+### 5.4 Random Forest: 7 attributes on training.undersampled
+```{r}
+set.seed(123)
+model_RF3 <- randomForest(Target~Registration+Age+Channel_Code+Vintage+Credit_Product+Region_Code+Occupation_Salaried, training.undersampled)
+varImpPlot(model_RF3)
+prediction_RF3 <- predict(model_RF3, test)
+confusionMatrix(prediction_RF3, test$Target, positive='1', mode = "prec_recall")
+prob_RF3 <- predict(model_RF3, test, type = "prob")
+ROC_RF3 <- roc(test$Target, prob_RF3[,2])
+auc(ROC_RF3)
+```
+
+
+### All models comparison
+
+```{r}
+# Plot the ROC curve for
+# 1. Logistic Regression
+# 2. Decision Tree
+# 3. Linear Discriminant Analysis
+# 4. Support Vector Machine
+# 5. Random Forest
+
+ggroc(list(LR = ROC_LR, DT = ROC_DT, SVM = ROC_SVM, LDA = ROC_LDA, RF = ROC_RF), legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") +
+   geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed")
+
+ROC_grouped_LR <- ggroc(list(Remaining_fourteen= ROC_LR, Three= ROC_LR1, Five= ROC_LR2, Seven= ROC_LR3),legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") + geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") + scale_color_manual(values = c("Remaining_fourteen" = "black", "Three" = "lightblue", "Five" = "yellow", "Seven" = "orange"))+ labs(title = "Logistic Regression" ,color = "Number of attributes")
+
+ROC_grouped_DT <- ggroc(list(Remaining_fourteen= ROC_DT, Three= ROC_DT1, Five= ROC_DT2, Seven= ROC_DT3),legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") + geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") + scale_color_manual(values = c("Remaining_fourteen" = "black", "Three" = "lightblue", "Five" = "yellow", "Seven" = "orange"))+ labs(title = "Decision Tree" ,color = "Number of attributes")
+
+ROC_grouped_LDA <- ggroc(list(Remaining_fourteen= ROC_LDA, Three= ROC_LDA1, Five= ROC_LDA2, Seven= ROC_LDA3),legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") + geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") + scale_color_manual(values = c("Remaining_fourteen" = "black", "Three" = "lightblue", "Five" = "yellow", "Seven" = "orange"))+ labs(title = "Linear Discriminant Analysis" ,color = "Number of attributes")
+
+ROC_grouped_SVM <- ggroc(list(Remaining_fourteen= ROC_SVM, Three= ROC_SVM1, Five= ROC_SVM2, Seven= ROC_SVM3),legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") + geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") + scale_color_manual(values = c("Remaining_fourteen" = "black", "Three" = "lightblue", "Five" = "yellow", "Seven" = "orange"))+ labs(title = "Support Vector Machine" ,color = "Number of attributes")
+
+ROC_grouped_RF <- ggroc(list(Remaining_fourteen= ROC_RF, Three= ROC_RF1, Five= ROC_RF2, Seven= ROC_RF3),legacy.axes=TRUE) + xlab("FPR") + ylab("TPR") + geom_abline(intercept = 0, slope = 1, color = "darkgrey", linetype = "dashed") + scale_color_manual(values = c("Remaining_fourteen" = "black", "Three" = "lightblue", "Five" = "yellow", "Seven" = "orange"))+ labs(title = "Random Forest" ,color = "Number of attributes")
+
+ ggarrange(ROC_grouped_LR, ROC_grouped_DT, ROC_grouped_LDA, ROC_grouped_SVM, ROC_grouped_RF, ncol=2, nrow=3, common.legend = T, legend="bottom")
+```
+
+### Model Evaluation 
+
+```{r}
+# Overfitting
+
+# Testing Accuracy
+test.accuracy_DT <- confusionMatrix(pred_DT, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_DT1 <- confusionMatrix(pred_DT1, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_DT2 <- confusionMatrix(pred_DT2, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_DT3 <- confusionMatrix(pred_DT3, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+
+test.accuracy_LDA <- confusionMatrix(pred_LDA, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_LDA1 <- confusionMatrix(pred_LDA1, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_LDA2 <- confusionMatrix(pred_LDA2, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_LDA3 <- confusionMatrix(pred_LDA3, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+
+test.accuracy_LR <- confusionMatrix(model_LR_class, test$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+test.accuracy_LR1 <- confusionMatrix(model_LR_NoSmot_class1, test$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+test.accuracy_LR2 <- confusionMatrix(model_LR_NoSmot_class2, test$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+test.accuracy_LR3 <- confusionMatrix(model_LR_NoSmot_class3, test$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+
+test.accuracy_RF <- confusionMatrix(prediction_RF, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_RF1 <- confusionMatrix(prediction_RF1, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_RF2 <- confusionMatrix(prediction_RF2, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_RF3 <- confusionMatrix(prediction_RF3, test$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+
+test.accuracy_SVM <- confusionMatrix(prediction_SVM, test$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_SVM1 <- confusionMatrix(prediction_SVM1, test$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_SVM2 <- confusionMatrix(prediction_SVM2, test$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+test.accuracy_SVM3 <- confusionMatrix(prediction_SVM3, test$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+
+test.accuracy <- data.frame(c(test.accuracy_DT1, test.accuracy_DT2, test.accuracy_DT3, test.accuracy_DT),
+           c(test.accuracy_LDA1, test.accuracy_LDA2, test.accuracy_LDA3, test.accuracy_LDA),
+           c(test.accuracy_LR1, test.accuracy_LR2, test.accuracy_LR3, test.accuracy_LR),
+           c(test.accuracy_RF1, test.accuracy_RF2, test.accuracy_RF3, test.accuracy_RF),
+           c(test.accuracy_SVM1, test.accuracy_SVM2, test.accuracy_SVM3, test.accuracy_SVM))
+
+colnames(test.accuracy) <- c("DT", "LDA", "LR", "RF", "SVM")
+rownames(test.accuracy) <- c("3 Variables", "5 Variables", "7 Variables", "All Variables")
+
+# Training Prediction
+pred.train_DT <- predict(model_DT, training, type = "class")
+pred.train_DT1 <- predict(model_DT1, training, type = "class")
+pred.train_DT2 <- predict(model_DT2, training, type = "class")
+pred.train_DT3 <- predict(model_DT3, training, type = "class")
+
+pred.train_LDA <- predict(model_LDA, training)$class
+pred.train_LDA1 <- predict(model_LDA1, training)$class
+pred.train_LDA2 <- predict(model_LDA2, training)$class
+pred.train_LDA3 <- predict(model_LDA3, training)$class
+
+pred.train_LR <- predict(model_LR, training, type = "response")
+pred.train_LR <- as.factor(ifelse(pred.train_LR > 0.5, 1, 0))
+pred.train_LR1 <- predict(model_LR1_NoSmot, training, type = "response")
+pred.train_LR1 <- as.factor(ifelse(pred.train_LR1 > 0.5, 1, 0))
+pred.train_LR2 <- predict(model_LR2_NoSmot, training, type = "response")
+pred.train_LR2 <- as.factor(ifelse(pred.train_LR2 > 0.5, 1, 0))
+pred.train_LR3 <- predict(model_LR3_NoSmot, training, type = "response")
+pred.train_LR3 <- as.factor(ifelse(pred.train_LR3 > 0.5, 1, 0))
+
+pred.train_RF <- predict(model_RF, training, type = "class")
+pred.train_RF1 <- predict(model_RF1, training, type = "class")
+pred.train_RF2 <- predict(model_RF2, training, type = "class")
+pred.train_RF3 <- predict(model_RF3, training, type = "class")
+
+pred.train_SVM <- predict(model_SVM, training, type = "class")
+pred.train_SVM1 <- predict(model_SVM1, training, type = "class")
+pred.train_SVM2 <- predict(model_SVM2, training, type = "class")
+pred.train_SVM3 <- predict(model_SVM3, training, type = "class")
+
+# Training Accuracy
+train.accuracy_DT <- confusionMatrix(pred.train_DT, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_DT1 <- confusionMatrix(pred.train_DT1, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_DT2 <- confusionMatrix(pred.train_DT2, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_DT3 <- confusionMatrix(pred.train_DT3, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+
+train.accuracy_LDA <- confusionMatrix(pred.train_LDA, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_LDA1 <- confusionMatrix(pred.train_LDA1, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_LDA2 <- confusionMatrix(pred.train_LDA2, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_LDA3 <- confusionMatrix(pred.train_LDA3, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+
+train.accuracy_LR <- confusionMatrix(pred.train_LR, training$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+train.accuracy_LR1 <- confusionMatrix(pred.train_LR1, training$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+train.accuracy_LR2 <- confusionMatrix(pred.train_LR2, training$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+train.accuracy_LR3 <- confusionMatrix(pred.train_LR3, training$Target, positive = "1", mode = "prec_recall")$overall['Accuracy']
+
+train.accuracy_RF <- confusionMatrix(pred.train_RF, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_RF1 <- confusionMatrix(pred.train_RF1, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_RF2 <- confusionMatrix(pred.train_RF2, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_RF3 <- confusionMatrix(pred.train_RF3, training$Target, positive ='1', mode = "prec_recall")$overall['Accuracy']
+
+train.accuracy_SVM <- confusionMatrix(pred.train_SVM, training$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_SVM1 <- confusionMatrix(pred.train_SVM1, training$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_SVM2 <- confusionMatrix(pred.train_SVM2, training$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+train.accuracy_SVM3 <- confusionMatrix(pred.train_SVM3, training$Target, positive='1', mode = "prec_recall")$overall['Accuracy']
+
+train.accuracy <- data.frame(c(train.accuracy_DT1, train.accuracy_DT2, train.accuracy_DT3, train.accuracy_DT),
+           c(train.accuracy_LDA1, train.accuracy_LDA2, train.accuracy_LDA3, train.accuracy_LDA),
+           c(train.accuracy_LR1, train.accuracy_LR2, train.accuracy_LR3, train.accuracy_LR),
+           c(train.accuracy_RF1, train.accuracy_RF2, train.accuracy_RF3, train.accuracy_RF),
+           c(train.accuracy_SVM1, train.accuracy_SVM2, train.accuracy_SVM3, train.accuracy_SVM))
+
+colnames(train.accuracy) <- c("DT", "LDA", "LR", "RF", "SVM")
+rownames(train.accuracy) <- c("3 Variables", "5 Variables", "7 Variables", "All Variables")
+
+# Check if test.accuracy > train.accuracy
+check.accuracy <- test.accuracy - train.accuracy
+```
+
+
+```{r}
+# Parallel Computing
+
+# Computational Time (Without Parallel Computing)
+comp.time_DT <- system.time(predict(model_DT, test, type = "class"))["elapsed"]
+comp.time_LDA <- system.time(predict(model_LDA, test, type = "class"))["elapsed"]
+comp.time_LR <- system.time(predict(model_LR, test, type = "response"))["elapsed"]
+comp.time_RF <- system.time(predict(model_RF, test, type = "class"))["elapsed"]
+comp.time_SVM <- system.time(predict(model_SVM, test, type = "class"))["elapsed"]
+
+comp.time <- data.frame(comp.time_DT, comp.time_LDA, comp.time_LR, comp.time_RF, comp.time_SVM)
+colnames(comp.time) <- c("DT", "LDA", "LR", "RF", "SVM")
+
+# Detect the number of available cores
+no_cores <- detectCores()
+
+# Split test data into chunks
+test_chunks <- split(test, rep(1:4, length.out = nrow(test)))
+
+# Computational Time (With Parallel Computing)
+comp.time.parallel_DT <- system.time(mclapply(test_chunks, function(chunk) predict(model_DT, newdata = chunk), mc.cores = no_cores))["elapsed"]
+comp.time.parallel_LDA <- system.time(mclapply(test_chunks, function(chunk) predict(model_LDA, newdata = chunk), mc.cores = no_cores))["elapsed"]
+comp.time.parallel_LR <- system.time(mclapply(test_chunks, function(chunk) predict(model_LR, newdata = chunk), mc.cores = no_cores))["elapsed"]
+comp.time.parallel_RF <- system.time(mclapply(test_chunks, function(chunk) predict(model_RF, newdata = chunk), mc.cores = no_cores))["elapsed"]
+comp.time.parallel_SVM <- system.time(mclapply(test_chunks, function(chunk) predict(model_SVM, newdata = chunk), mc.cores = no_cores))["elapsed"]
+
+comp.time.parallel <- data.frame(comp.time.parallel_DT, comp.time.parallel_LDA, comp.time.parallel_LR,
+                                 comp.time.parallel_RF, comp.time.parallel_SVM)
+colnames(comp.time.parallel) <- c("DT", "LDA", "LR", "RF", "SVM")
+
+# Time Comparison
+time_compare <- rbind(comp.time, comp.time.parallel, (comp.time.parallel-comp.time)/comp.time)
+row.names(time_compare) = c("Without Parallel", "With Parallel", "% Change")
+```
+
+```{r}
+# Cumulative gain chart
+
+# Provide probabilities for the outcome of interest and obtain the gain chart data
+GainTable_DT <- cumGainsTable(prob_DT[,2], test$Target, resolution = 1/100)
+GainTable_LDA <- cumGainsTable(prob_LDA[,2], test$Target, resolution = 1/100)
+GainTable_LR <- cumGainsTable(model_LR_pred, test$Target, resolution = 1/100)
+GainTable_RF <- cumGainsTable(prob_RF[,2], test$Target, resolution = 1/100)
+GainTable_SVM <- cumGainsTable(prob_SVM[,2], test$Target, resolution = 1/100)
+
+# Plot cumulative gain chart
+plot(GainTable_DT[,4], col = "red", type = "l", 
+     xlab = "Percentage of Test Instances", ylab = "Percentage of Correct Predictions")
+lines(GainTable_LDA[,4], col = "green", type = "l")
+lines(GainTable_LR[,4], col = "blue", type = "l")
+lines(GainTable_RF[,4], col = "black", type = "l")
+lines(GainTable_SVM[,4], col = "orange", type = "l")
+grid(NULL, lwd = 1)
+
+legend("bottomright", c("Decision Tree", "Linear Discriminant Analysis", "Logistic Regression", "Random Forest", "Support Vector Machine"),
+fill=c("red","green", "blue", "black", "orange"))
+```
